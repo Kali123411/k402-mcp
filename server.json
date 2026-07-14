@@ -1,17 +1,27 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-09-29/server.schema.json",
-  "name": "io.github.kali123411/k402",
-  "description": "Agent-payable APIs on Kaspa: text tools, chain data, GPU inference — pay per call in KAS, no account or API key",
-  "version": "0.1.0",
+  "name": "io.github.Kali123411/k402",
+  "description": "Agent-payable APIs on Kaspa: text tools, chain data, GPU inference \u2014 pay per call in KAS",
+  "version": "0.1.1",
   "packages": [
     {
       "registryType": "pypi",
       "identifier": "k402-mcp",
-      "version": "0.1.0",
-      "transport": { "type": "stdio" },
+      "version": "0.1.1",
+      "transport": {
+        "type": "stdio"
+      },
       "environmentVariables": [
-        { "name": "K402_GATEWAY", "description": "Gateway URL (defaults to the public k402 gateway)", "isRequired": false },
-        { "name": "K402_SESSION", "description": "Pin a funded session key (otherwise open_session mints one)", "isRequired": false }
+        {
+          "name": "K402_GATEWAY",
+          "description": "Gateway URL (defaults to the public k402 gateway)",
+          "isRequired": false
+        },
+        {
+          "name": "K402_SESSION",
+          "description": "Pin a funded session key (otherwise open_session mints one)",
+          "isRequired": false
+        }
       ]
     }
   ]

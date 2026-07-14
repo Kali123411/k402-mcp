@@ -56,6 +56,6 @@ The first call returns how-to-pay instructions; fund the deposit address it give
 - Need KAS? Any exchange or wallet works — deposits are plain mainnet transfers.
 
 ---
-`mcpName: io.github.kali123411/k402`
+`mcp-name: io.github.Kali123411/k402`
 
 MIT © Kaspa Lab
