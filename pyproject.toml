@@ -1,0 +1,29 @@
+[project]
+name = "k402-mcp"
+version = "0.1.0"
+description = "MCP server for the k402 agent-payable API catalog on Kaspa — text tools, chain data, and GPU inference, paid per call in KAS with no account or API key"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Kaspa Lab" }]
+keywords = ["mcp", "kaspa", "k402", "x402", "agent-payments", "micropayments"]
+classifiers = [
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Topic :: Software Development :: Libraries",
+]
+dependencies = ["mcp>=1.2", "httpx>=0.27"]
+
+[project.urls]
+Homepage = "https://github.com/Kali123411/k402-mcp"
+Repository = "https://github.com/Kali123411/k402-mcp"
+
+[project.scripts]
+k402-mcp = "k402_mcp:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+include = ["k402_mcp.py"]
