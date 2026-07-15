@@ -133,9 +133,9 @@ compiler. Node backend is env-selected:
 
 | Env | Backend | Protocol | Notes |
 |---|---|---|---|
-| production | own mainnet node (192.168.4.33, same as k402-chain-data-main) | gRPC 16110 | utxoindex required |
+| production | own mainnet node | gRPC 16110 | utxoindex required |
 | testing / CI | PNN via Kaspa Resolver (least-loaded public node) | wRPC (Borsh 17110 / JSON 18110) | zero infra; PNN is explicitly dev/test-grade — never point production at it |
-| zk extension | local TN10 fork node (127.0.0.1:16110) | gRPC | zkgate / precompile covenants |
+| zk extension | TN10 fork node | gRPC | zkgate / precompile covenants |
 
 Config: `KASPA_BACKEND=grpc://host:port` or `KASPA_BACKEND=resolver://mainnet`.
 The app needs a wRPC client for the resolver path (kaspa Python SDK /
