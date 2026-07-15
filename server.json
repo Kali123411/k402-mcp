@@ -2,12 +2,12 @@
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-09-29/server.schema.json",
   "name": "io.github.Kali123411/k402",
   "description": "Agent-payable APIs on Kaspa: text tools, chain data, GPU inference \u2014 pay per call in KAS",
-  "version": "0.1.1",
+  "version": "0.3.0",
   "packages": [
     {
       "registryType": "pypi",
       "identifier": "k402-mcp",
-      "version": "0.1.1",
+      "version": "0.3.0",
       "transport": {
         "type": "stdio"
       },

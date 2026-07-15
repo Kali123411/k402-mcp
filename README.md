@@ -2,7 +2,9 @@
 
 An MCP server that gives any agent (Claude Code, Claude Desktop, agent SDKs) a catalog of
 **agent-payable APIs**: text tools (summarize, schema-guaranteed extraction, classify, rewrite),
-web reading, embeddings + semantic search, live Kaspa mainnet chain data, and GPU model tiers.
+web reading, embeddings + semantic search, live Kaspa mainnet chain data, GPU model tiers,
+covenants-as-a-service (compile/derive/inspect/build/check/broadcast Silverscript covenants), and
+RISC Zero attestation-as-a-service (upload a guest, preflight for a cycle-exact quote, prove, verify).
 **No account, no card, no API key** — the agent opens a session, gets a personal KAS deposit
 address, and every call meters against the prepaid balance. Prices are USD-pegged, fractions of a
 cent per call, settled on Kaspa L1 (sub-second, ~zero fees).
@@ -37,7 +39,9 @@ session key), `K402_STATE` (where the auto-opened session persists, default `~/.
    any wallet (min 0.25 KAS — confirmed in seconds)
 3. Call anything: `summarize`, `extract`, `classify`, `rewrite`, `read_url`, `embed_text`,
    `search_index`/`search_query`, `kaspa_balance`, `kaspa_utxos`, `kaspa_tx_status`,
-   `kaspa_fee_estimate`, `kaspa_network`, `generate` (tiers: chat / reason / code / kaspa-expert)
+   `kaspa_fee_estimate`, `kaspa_network`, `generate` (tiers: chat / reason / code / kaspa-expert),
+   `covenant_compile`/`covenant_address`/`covenant_utxos`/`covenant_build`/`covenant_check`/`covenant_broadcast`,
+   `prove_guest_upload`/`prove_preflight`/`prove_submit`/`job_status`/`job_result`/`attest_verify`
 4. `session_status` — watch the balance draw down (free)
 
 Example, in Claude Code after `claude mcp add`:

@@ -2,7 +2,8 @@
 # k402-mcp — MCP server exposing the k402 agent-payable API catalog as tools.
 #
 # Any MCP-capable agent (Claude Code, Claude Desktop, agent SDKs) gets the whole paid catalog —
-# text tools, Kaspa chain data, GPU inference — as ordinary tools. Payment is a prepaid KAS
+# text tools, Kaspa chain data, GPU inference, covenants-as-a-service, and RISC Zero
+# attestation-as-a-service — as ordinary tools. Payment is a prepaid KAS
 # balance: open_session() mints a personal mainnet deposit address; fund it from any wallet and
 # every paid tool call meters against it. A 402 comes back as readable "how to pay" instructions,
 # so an agent can discover the service, learn how to fund it, and (once funded) use it — the whole
@@ -48,6 +49,14 @@ def _paid(path, body):
                 f"~{out.get('neededKas', '?')} KAS. Balance updates within seconds of confirmation.",
                 **out}
     return out
+
+def _free_get(path):
+    """GET a free endpoint (job polling); no payment."""
+    r = http.get(f"{GATEWAY}{path}")
+    try:
+        return r.json()
+    except Exception:
+        return {"error": f"gateway returned non-JSON (HTTP {r.status_code})"}
 
 # ------------------------------------------------------------------ free: discovery + payment
 @mcp.tool()
@@ -173,6 +182,105 @@ def generate(prompt: str, tier: str = "chat", system: str = "", max_tokens: int 
         return {"tier": tier, "text": out["choices"][0]["message"]["content"],
                 "usage": out.get("usage")}
     return out
+
+# ------------------------------------------------------------------ paid: covenants-as-a-service
+# Compile Silverscript covenants, derive addresses, inspect state, build/verify/broadcast spends on
+# Kaspa mainnet (or testnet-10). The service never signs — you sign locally, keys never leave you.
+@mcp.tool()
+def covenant_compile(source: str, constructor_args: list = None) -> dict:
+    """Compile a Silverscript covenant to script hex, ABI, hardened template hash, and its P2SH
+    address on each network. constructor_args is the silverc ctor JSON (e.g.
+    [{"kind":"int","data":7}]). Paid (~$0.002). NOTE: 'compiles' ≠ proven on-chain."""
+    body = {"source": source}
+    if constructor_args is not None:
+        body["constructor_args"] = constructor_args
+    return _paid("/covenant/compile", body)
+
+@mcp.tool()
+def covenant_address(script_hex: str, network: str = "mainnet") -> dict:
+    """Derive the covenant P2SH address for a compiled script on 'mainnet' or 'testnet-10'.
+    Paid (~$0.0003)."""
+    return _paid("/covenant/address", {"script_hex": script_hex, "network": network})
+
+@mcp.tool()
+def covenant_utxos(address: str, network: str = "mainnet", covenant_id: str = "") -> dict:
+    """Live UTXO set locked under a covenant address (covenant state inspection), from the node.
+    Optionally filter by covenant_id. Paid (~$0.0003)."""
+    body = {"address": address, "network": network}
+    if covenant_id:
+        body["covenant_id"] = covenant_id
+    return _paid("/covenant/utxos", body)
+
+@mcp.tool()
+def covenant_build(inputs: list, outputs: list, network: str = "mainnet",
+                   lock_time: int = 0, payload_hex: str = "") -> dict:
+    """Assemble a covenant spend tx. Each input: {txid, index, entry, compute_budget?, and either
+    sigscript:{source,decl,args,is_leader?} to build a covenant sigscript server-side, or omit
+    sigscript for a P2PK input you sign locally}. Each output: {amount, address|script_public_key_hex,
+    covenant?:{authorizing_input,covenant_id}}. Returns the tx, a broadcast-ready rpc_transaction,
+    fee accounting, and (if fully authorized) a pre-verify. We never sign. Paid (~$0.001)."""
+    return _paid("/covenant/build", {"inputs": inputs, "outputs": outputs,
+                                     "network": network, "lock_time": lock_time,
+                                     "payload_hex": payload_hex})
+
+@mcp.tool()
+def covenant_check(transaction: dict, entries: list) -> dict:
+    """Local txscript pre-verify of a signed covenant tx BEFORE broadcast — catches script failures
+    that would otherwise cost you a broadcast. 'entries' are the spent UTXOs (covenant_utxos output
+    plugs in directly). Returns {all_ok, inputs:[{index, ok, error?}]}. Paid (~$0.0005)."""
+    return _paid("/covenant/check", {"transaction": transaction, "entries": entries})
+
+@mcp.tool()
+def covenant_broadcast(transaction: dict, network: str = "mainnet") -> dict:
+    """Broadcast a signed covenant tx (RpcTransaction JSON from covenant_build). MAINNET moves real
+    KAS — run covenant_check first. Paid (~$0.0003)."""
+    return _paid("/covenant/broadcast", {"transaction": transaction, "network": network})
+
+# ------------------------------------------------------------------ paid: attestation-as-a-service
+# RISC Zero proving behind an async job model: upload a guest once, preflight for a cycle-exact
+# quote, submit a proof (dynamic price), poll for the receipt, verify it. The receipt is a portable
+# attestation anyone can check with attest_verify.
+@mcp.tool()
+def prove_guest_upload(program_b64: str) -> dict:
+    """Upload a RISC Zero program binary (the .bin risc0-build emits, base64) once; returns its
+    content-addressed image_id (also the verification key), reusable across proofs. Paid (~$0.01)."""
+    return _paid("/prove/guests", {"program_b64": program_b64})
+
+@mcp.tool()
+def prove_preflight(image_id: str, input_b64: str = "") -> dict:
+    """Execute a guest WITHOUT proving: exact cycle count + a signed price quote
+    {total_cycles, price_kas, quote_id, quote_expires}. Run this first — proving cost scales with
+    cycles by orders of magnitude. Paid (~$0.002)."""
+    return _paid("/prove/preflight", {"image_id": image_id, "input_b64": input_b64})
+
+@mcp.tool()
+def prove_submit(image_id: str, input_b64: str = "", quote_id: str = "", max_kas: float = 0) -> dict:
+    """Queue a proving job -> {job_id, cost_kas}. Pass quote_id (from prove_preflight; charged the
+    quote) or max_kas (skip preflight; priced on actual cycles, refuses if over the cap). Then poll
+    job_status and fetch job_result. Paid: the proof's cycle-based price (dynamic)."""
+    body = {"image_id": image_id, "input_b64": input_b64}
+    if quote_id:
+        body["quote_id"] = quote_id
+    else:
+        body["max_kas"] = max_kas
+    return _paid("/jobs/prove", body)
+
+@mcp.tool()
+def job_status(job_id: str) -> dict:
+    """Poll a proving job: queued/running/done/failed, queue position, cost. Free."""
+    return _free_get(f"/jobs/{job_id}")
+
+@mcp.tool()
+def job_result(job_id: str) -> dict:
+    """Fetch a finished proving job's result {image_id, total_cycles, journal_b64, receipt_b64}.
+    404 until done; results kept 24h. Free."""
+    return _free_get(f"/jobs/{job_id}/result")
+
+@mcp.tool()
+def attest_verify(receipt_b64: str, image_id: str) -> dict:
+    """Verify a RISC Zero receipt against an image_id -> {valid, journal_b64}. Anyone can check an
+    attestation without trusting the prover. Paid (~$0.0002)."""
+    return _paid("/attest/verify", {"receipt_b64": receipt_b64, "image_id": image_id})
 
 def main():
     mcp.run()
