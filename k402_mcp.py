@@ -13,24 +13,60 @@
 # service, learn how to pay, and use it — the whole loop without a human account, card, or API key.
 #
 # Env: K402_GATEWAY (default: the public gateway), K402_SESSION (optional fixed session key),
-#      K402_STATE (session persistence, default ~/.k402/session.json)
-import json, os, pathlib
+#      K402_STATE (session persistence, default ~/.k402/session.json),
+#      K402_MCP_TRANSPORT (stdio | streamable-http), K402_MCP_HOST / K402_MCP_PORT (HTTP mode)
+import json, os, pathlib, weakref
 import httpx
 from mcp.server.fastmcp import FastMCP
 
 GATEWAY = os.environ.get("K402_GATEWAY", "https://x402-compute.68cxgfyr0.workers.dev").rstrip("/")
 STATE = pathlib.Path(os.environ.get("K402_STATE", os.path.expanduser("~/.k402/session.json")))
 
-mcp = FastMCP("k402")
+# stdio (default) serves ONE user, so the session persists to K402_STATE. streamable-http is the
+# hosted endpoint: MANY strangers share this process, so each MCP connection gets its own session,
+# held in memory keyed by the connection — never on disk, never from env, never shared.
+TRANSPORT = os.environ.get("K402_MCP_TRANSPORT", "stdio")
+HTTP_MODE = TRANSPORT == "streamable-http"
+
+mcp = FastMCP("k402",
+              host=os.environ.get("K402_MCP_HOST", "127.0.0.1"),
+              port=int(os.environ.get("K402_MCP_PORT", "8750")))
 http = httpx.Client(timeout=180)
 
+_conn_sessions = weakref.WeakKeyDictionary()  # HTTP mode: ServerSession -> k402 session key
+
+def _conn():
+    """The current MCP connection's ServerSession (None outside a request)."""
+    try:
+        from mcp.server.lowlevel.server import request_ctx
+        return request_ctx.get().session
+    except Exception:
+        return None
+
 def _session():
+    if HTTP_MODE:
+        c = _conn()
+        return _conn_sessions.get(c) if c is not None else None
     if os.environ.get("K402_SESSION"):
         return os.environ["K402_SESSION"]
     try:
         return json.loads(STATE.read_text())["session"]
     except Exception:
         return None
+
+def _remember(session_key, deposit=None):
+    """Bind a session to this connection (HTTP mode) or persist it (stdio). Returns a user note."""
+    if HTTP_MODE:
+        c = _conn()
+        if c is not None:
+            _conn_sessions[c] = session_key
+        return ("session bound to this MCP connection. SAVE the session key — hosted connections "
+                "don't persist, so re-attach with use_session(<key>) after any reconnect.")
+    STATE.parent.mkdir(parents=True, exist_ok=True)
+    STATE.write_text(json.dumps({"session": session_key, "depositAddress": deposit,
+                                 "gateway": GATEWAY}))
+    STATE.chmod(0o600)
+    return f"session saved to {STATE} — fund the deposit address, then call any paid tool"
 
 def _offer_line(o):
     """Human-readable one-liner for a per-call coin offer."""
@@ -95,12 +131,22 @@ def open_session() -> dict:
     is saved locally so subsequent calls use it automatically."""
     r = http.post(f"{GATEWAY}/onboard/request", json={}).json()
     if "session" in r:
-        STATE.parent.mkdir(parents=True, exist_ok=True)
-        STATE.write_text(json.dumps({"session": r["session"], "depositAddress": r["depositAddress"],
-                                     "gateway": GATEWAY}))
-        STATE.chmod(0o600)
-        r["note"] = f"session saved to {STATE} — fund the deposit address, then call any paid tool"
+        r["note"] = _remember(r["session"], r.get("depositAddress"))
     return r
+
+@mcp.tool()
+def use_session(session: str) -> dict:
+    """Attach an existing k402 session key (from a previous open_session) so paid calls meter
+    against its balance — use after reconnecting to the hosted endpoint, or to carry one funded
+    session across clients. Returns the session's current balance. Free."""
+    r = http.get(f"{GATEWAY}/session/{session}")
+    try:
+        out = r.json()
+    except Exception:
+        return {"error": f"gateway returned non-JSON (HTTP {r.status_code})"}
+    if r.status_code != 200:
+        return {"error": "unknown or expired session key", "gateway_said": out}
+    return {**out, "note": _remember(session, out.get("depositAddress"))}
 
 @mcp.tool()
 def session_status() -> dict:
@@ -336,7 +382,9 @@ def attest_verify(receipt_b64: str, image_id: str) -> dict:
     return _paid("/attest/verify", {"receipt_b64": receipt_b64, "image_id": image_id})
 
 def main():
-    mcp.run()
+    if TRANSPORT not in ("stdio", "sse", "streamable-http"):
+        raise SystemExit(f"K402_MCP_TRANSPORT must be stdio | sse | streamable-http, got {TRANSPORT!r}")
+    mcp.run(transport=TRANSPORT)
 
 if __name__ == "__main__":
     main()

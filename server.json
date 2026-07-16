@@ -1,13 +1,13 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-09-29/server.schema.json",
   "name": "io.github.Kali123411/k402",
-  "description": "Agent-payable APIs on Kaspa: text tools, chain data, GPU inference \u2014 pay per call in KAS",
-  "version": "0.4.0",
+  "description": "Agent-payable APIs on Kaspa: LLMs, chain data, covenants, zk proofs — pay per call, no API key",
+  "version": "0.5.0",
   "packages": [
     {
       "registryType": "pypi",
       "identifier": "k402-mcp",
-      "version": "0.4.0",
+      "version": "0.5.0",
       "transport": {
         "type": "stdio"
       },
@@ -23,6 +23,12 @@
           "isRequired": false
         }
       ]
+    }
+  ],
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://x402-compute.68cxgfyr0.workers.dev/mcp"
     }
   ]
 }

@@ -13,7 +13,24 @@ The payment loop is agent-native: an unfunded call returns *instructions* ("send
 address, this call costs X"), so an agent can discover the service, learn how to pay, and use it
 autonomously — the [x402](https://www.x402.org/) idea, on Kaspa.
 
-## Install
+## Hosted endpoint — zero install
+
+The same server runs hosted at the public gateway (streamable HTTP):
+
+```
+https://x402-compute.68cxgfyr0.workers.dev/mcp
+```
+
+Claude Code:
+```bash
+claude mcp add --transport http k402 https://x402-compute.68cxgfyr0.workers.dev/mcp
+```
+
+Hosted sessions are **per-connection**: `open_session` binds the payment session to your MCP
+connection and returns the key — save it, and re-attach with `use_session(<key>)` after a
+reconnect. Nothing is shared between connections.
+
+## Install (local stdio)
 
 ```bash
 pip install k402-mcp
