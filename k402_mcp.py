@@ -3,11 +3,14 @@
 #
 # Any MCP-capable agent (Claude Code, Claude Desktop, agent SDKs) gets the whole paid catalog —
 # text tools, Kaspa chain data, GPU inference, covenants-as-a-service, and RISC Zero
-# attestation-as-a-service — as ordinary tools. Payment is a prepaid KAS
-# balance: open_session() mints a personal mainnet deposit address; fund it from any wallet and
-# every paid tool call meters against it. A 402 comes back as readable "how to pay" instructions,
-# so an agent can discover the service, learn how to fund it, and (once funded) use it — the whole
-# loop without a human account, card, or API key.
+# attestation-as-a-service — as ordinary tools. Pay either way:
+#   • prepaid session — open_session() mints a personal KAS deposit address; fund once and every
+#     paid call meters against it (simplest, no per-call step); or
+#   • per-call in any coin the gateway accepts (Kaspa, Pearl, BTC, LTC, DOGE, BCH, DASH, and EVM
+#     assets ETC/ETH/USDC/USDT) — a 402 returns the coin offers; pay one on-chain and call
+#     pay_per_call() to complete it. See payment_options().
+# A 402 comes back as readable "how to pay" instructions either way, so an agent can discover the
+# service, learn how to pay, and use it — the whole loop without a human account, card, or API key.
 #
 # Env: K402_GATEWAY (default: the public gateway), K402_SESSION (optional fixed session key),
 #      K402_STATE (session persistence, default ~/.k402/session.json)
@@ -29,8 +32,20 @@ def _session():
     except Exception:
         return None
 
+def _offer_line(o):
+    """Human-readable one-liner for a per-call coin offer."""
+    s = o.get("scheme")
+    if s == "kaspa-utxo":
+        return f"KAS {int(o['amount_sompi'])/1e8:g} → {o['pay_to']}"
+    if s == "blockbook-utxo":
+        return f"{o['coin'].upper()} {int(o['amount'])/10**o['decimals']:g} → {o['pay_to']}"
+    if s == "evm":
+        return f"{o['asset']} {int(o['amount'])/10**o['decimals']:g} (chain {o['chain_id']}) → {o['pay_to']}"
+    return None
+
 def _paid(path, body):
-    """POST a paid endpoint with the session; turn 402s into actionable payment instructions."""
+    """POST a paid endpoint with the session; turn 402s into actionable payment instructions —
+    both the prepaid-session path and the per-call coin offers the gateway returns."""
     sid = _session()
     headers = {"X-Session": sid} if sid else {}
     r = http.post(f"{GATEWAY}{path}", json=body, headers=headers)
@@ -39,15 +54,22 @@ def _paid(path, body):
     except Exception:
         return {"error": f"gateway returned non-JSON (HTTP {r.status_code})"}
     if r.status_code == 402:
-        if not sid:
-            return {"payment_required": True,
-                    "how_to_pay": "No session yet. Call the open_session tool to get a personal "
-                                  "Kaspa deposit address, fund it with KAS from any wallet, then retry."}
-        return {"payment_required": True, "how_to_pay":
-                f"Session balance is too low. Send KAS to your deposit address "
-                f"{out.get('depositAddress', '(see session_status)')} — this call costs "
-                f"~{out.get('neededKas', '?')} KAS. Balance updates within seconds of confirmation.",
-                **out}
+        coin_offers = [o for o in out.get("accepts", [])
+                       if o.get("scheme") in ("kaspa-utxo", "blockbook-utxo", "evm")]
+        session_hint = ("Call open_session to get a prepaid deposit address, fund it once, then "
+                        "every call meters against it — no per-call step." if not sid else
+                        f"Session balance low — top up your deposit address (session_status). "
+                        f"This call ~{out.get('neededKas', '?')} KAS.")
+        return {"payment_required": True,
+                "how_to_pay": "Pick ONE: (A) prepaid session — " + session_hint +
+                              "  (B) per-call — pay ONE coin offer below on-chain, then call "
+                              "pay_per_call(endpoint, request_body, scheme, payment_id, txid).",
+                "endpoint": path, "request_body": body,
+                "pay_per_call_offers": [
+                    {"pay": _offer_line(o), "scheme": o["scheme"], "payment_id": o["payment_id"],
+                     "expires": o.get("expires")}
+                    for o in coin_offers if _offer_line(o)],
+                **{k: v for k, v in out.items() if k in ("depositAddress", "onboard")}}
     return out
 
 def _free_get(path):
@@ -88,6 +110,37 @@ def session_status() -> dict:
     if not sid:
         return {"session": None, "note": "no session yet — call open_session first"}
     return http.get(f"{GATEWAY}/session/{sid}").json()
+
+@mcp.tool()
+def payment_options() -> dict:
+    """Which coins and schemes this gateway accepts for payment. Free. Two ways to pay any paid
+    tool: a prepaid KAS session (open_session — simplest, no per-call step) OR per-call in any
+    listed coin (pay the offer a 402 returns, then call pay_per_call). Coins may include Kaspa,
+    Pearl, BTC, LTC, DOGE, BCH, DASH, and EVM assets (ETC, ETH, USDC, USDT)."""
+    k = http.get(f"{GATEWAY}/").json().get("k402", {})
+    return {"schemes": k.get("schemes", []), "coins": k.get("coins", []),
+            "how": "Prepaid session: open_session (fund once). Per-call: any paid tool returns "
+                   "coin offers in its 402; pay one on-chain, then pay_per_call(...).",
+            "facilitator": k.get("facilitator")}
+
+@mcp.tool()
+def pay_per_call(endpoint: str, request_body: dict, scheme: str, payment_id: str, txid: str) -> dict:
+    """Complete a PER-CALL coin payment. After a paid tool returns a 402 with pay_per_call_offers,
+    pay one offer on-chain from your own wallet, then call this with the 402's `endpoint` and
+    `request_body`, the chosen offer's `scheme` and `payment_id`, and your payment `txid`. The
+    gateway verifies the payment landed and returns the tool's real result. (Alternative to a
+    prepaid session — use this when you'd rather pay each call directly in a specific coin.)"""
+    hdr = {"X-K402-Payment": f"{scheme} {txid} {payment_id}"}
+    r = http.post(f"{GATEWAY}{endpoint}", json=request_body, headers=hdr)
+    try:
+        out = r.json()
+    except Exception:
+        return {"error": f"gateway returned non-JSON (HTTP {r.status_code})"}
+    if r.status_code == 402:
+        return {"payment_required": True,
+                "reason": out.get("reason", "payment not verified yet"),
+                "note": "If you just paid, the tx may not be confirmed — retry pay_per_call in a moment."}
+    return out
 
 # ------------------------------------------------------------------ paid: text tools
 @mcp.tool()

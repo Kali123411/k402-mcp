@@ -41,7 +41,8 @@ session key), `K402_STATE` (where the auto-opened session persists, default `~/.
    `search_index`/`search_query`, `kaspa_balance`, `kaspa_utxos`, `kaspa_tx_status`,
    `kaspa_fee_estimate`, `kaspa_network`, `generate` (tiers: chat / reason / code / kaspa-expert),
    `covenant_compile`/`covenant_address`/`covenant_utxos`/`covenant_build`/`covenant_check`/`covenant_broadcast`,
-   `prove_guest_upload`/`prove_preflight`/`prove_submit`/`job_status`/`job_result`/`attest_verify`
+   `prove_guest_upload`/`prove_preflight`/`prove_submit`/`job_status`/`job_result`/`attest_verify`,
+   `payment_options`, `pay_per_call`
 4. `session_status` — watch the balance draw down (free)
 
 Example, in Claude Code after `claude mcp add`:
