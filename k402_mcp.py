@@ -271,9 +271,10 @@ def kaspa_network() -> dict:
 # ------------------------------------------------------------------ paid: LLM tiers
 @mcp.tool()
 def generate(prompt: str, tier: str = "chat", system: str = "", max_tokens: int = 512) -> dict:
-    """Run a prompt on a GPU model tier: 'chat' (fast 7B, ~$0.0015), 'reason' (35B, ~$0.004),
-    'code' (coder model, ~$0.0025), or 'kaspa-expert' (RAG-grounded, current Kaspa knowledge,
-    ~$0.0015). Returns the completion text."""
+    """Run a prompt on a GPU model tier: 'chat' (fast 7B, ~$0.0015), 'llama' (budget 8B, ~$0.0008),
+    'reason' (35B, ~$0.004), 'think' (deep chain-of-thought 35B MoE, ~$0.004), 'code' (coder model,
+    ~$0.0025), or 'kaspa-expert' (RAG-grounded, current Kaspa knowledge, ~$0.0015). Returns the
+    completion text."""
     msgs = ([{"role": "system", "content": system}] if system else []) + \
            [{"role": "user", "content": prompt}]
     out = _paid("/v1/chat/completions", {"model": tier, "messages": msgs, "max_tokens": max_tokens})
