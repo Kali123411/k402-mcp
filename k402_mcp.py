@@ -158,11 +158,41 @@ def session_status() -> dict:
     return http.get(f"{GATEWAY}/session/{sid}").json()
 
 @mcp.tool()
+def channel_config() -> dict:
+    """Parameters for opening a kaspa-channel — a covenant-enforced payment channel that settles
+    per-call vouchers on Kaspa L1 with NO custodian (the trustless alternative to a prepaid
+    session). Returns the payee pubkey, min/max channel size, required expiry lead, and maxfee.
+    Free. Opening a channel means funding the channel covenant on-chain (payer holds the key), then
+    paying per call with signed vouchers — use the `k402` Python client (`pip install k402`,
+    k402.channel) to build the covenant and sign vouchers, since that flow needs your Kaspa key.
+    Returns {error} if this gateway hasn't enabled the (experimental) channel rail."""
+    r = http.get(f"{GATEWAY}/channel/config")
+    try:
+        return r.json()
+    except Exception:
+        return {"error": f"gateway returned non-JSON (HTTP {r.status_code})"}
+
+@mcp.tool()
+def channel_status(channel_id: str) -> dict:
+    """Status of a kaspa-channel by its channel id (covenant id): funded value, amount spent via
+    vouchers, remaining, expiry, and whether it has been closed on-chain. Free."""
+    r = http.get(f"{GATEWAY}/channel/{channel_id}")
+    try:
+        out = r.json()
+    except Exception:
+        return {"error": f"gateway returned non-JSON (HTTP {r.status_code})"}
+    if r.status_code != 200:
+        return {"error": "unknown channel", "gateway_said": out}
+    return out
+
+@mcp.tool()
 def payment_options() -> dict:
-    """Which coins and schemes this gateway accepts for payment. Free. Two ways to pay any paid
-    tool: a prepaid KAS session (open_session — simplest, no per-call step) OR per-call in any
-    listed coin (pay the offer a 402 returns, then call pay_per_call). Coins may include Kaspa,
-    Pearl, BTC, LTC, DOGE, BCH, DASH, and EVM assets (ETC, ETH, USDC, USDT)."""
+    """Which coins and schemes this gateway accepts for payment. Free. Ways to pay any paid tool:
+    a prepaid KAS session (open_session — simplest, no per-call step); per-call in any listed coin
+    (pay the offer a 402 returns, then pay_per_call); or, where the experimental 'kaspa-channel'
+    scheme is offered, a covenant payment channel that settles per-call vouchers on L1 with no
+    custodian (see channel_config). Coins may include Kaspa, Pearl, BTC, LTC, DOGE, BCH, DASH, and
+    EVM assets (ETC, ETH, USDC, USDT)."""
     k = http.get(f"{GATEWAY}/").json().get("k402", {})
     return {"schemes": k.get("schemes", []), "coins": k.get("coins", []),
             "how": "Prepaid session: open_session (fund once). Per-call: any paid tool returns "

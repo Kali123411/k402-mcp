@@ -56,11 +56,23 @@ session key), `K402_STATE` (where the auto-opened session persists, default `~/.
    any wallet (min 0.25 KAS — confirmed in seconds)
 3. Call anything: `summarize`, `extract`, `classify`, `rewrite`, `read_url`, `embed_text`,
    `search_index`/`search_query`, `kaspa_balance`, `kaspa_utxos`, `kaspa_tx_status`,
-   `kaspa_fee_estimate`, `kaspa_network`, `generate` (tiers: chat / reason / code / kaspa-expert),
+   `kaspa_fee_estimate`, `kaspa_network`, `generate` (tiers: chat / llama / reason / think / code / kaspa-expert),
    `covenant_compile`/`covenant_address`/`covenant_utxos`/`covenant_build`/`covenant_check`/`covenant_broadcast`,
    `prove_guest_upload`/`prove_preflight`/`prove_submit`/`job_status`/`job_result`/`attest_verify`,
    `payment_options`, `pay_per_call`
 4. `session_status` — watch the balance draw down (free)
+
+**New here? Start with `open_session`** — one funded deposit address, and every call meters
+against it. That's the whole loop. The other schemes (per-call coins, or trustless payment
+channels) are for when you want them; `payment_options` explains each.
+
+### Trustless payment channels (`kaspa-channel`)
+
+Where the gateway offers it, `channel_config`/`channel_status` expose a covenant payment channel:
+your KAS sits in a Kaspa L1 covenant (not the merchant's wallet), and you pay per call with signed
+vouchers — the merchant can only ever claim what you signed, and you reclaim the rest. Opening and
+funding a channel needs your Kaspa key, so that part runs in the [`k402`](https://pypi.org/project/k402/)
+Python client (`k402.channel`); these MCP tools cover discovery and status.
 
 Example, in Claude Code after `claude mcp add`:
 
@@ -70,9 +82,9 @@ The first call returns how-to-pay instructions; fund the deposit address it give
 
 ## Notes & honest caveats
 
-- **Prototype.** The payment rail is custodial-prepaid today (a trustless covenant-based
-  settlement layer — the k402 protocol on Kaspa L1 — is in the works). Keep balances small:
-  a few KAS covers thousands of calls.
+- **Prototype.** Payments settle either custodial-prepaid (sessions) or trustlessly via
+  `kaspa-channel` covenant payment channels (live on mainnet, covenant unaudited — channel sizes
+  are capped). Keep balances small: a few KAS covers thousands of calls.
 - Paid tools return `payment_required` + instructions instead of failing opaquely.
 - The gateway rate-limits per IP; prices float with KAS/USD, so `catalog` shows current numbers.
 - Need KAS? Any exchange or wallet works — deposits are plain mainnet transfers.

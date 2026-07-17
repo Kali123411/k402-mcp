@@ -1,6 +1,6 @@
 [project]
 name = "k402-mcp"
-version = "0.5.0"
+version = "0.6.0"
 description = "MCP server for the k402 agent-payable API catalog on Kaspa — text tools, chain data, GPU inference, covenants, and zk attestation, paid per call in KAS with no account or API key"
 readme = "README.md"
 requires-python = ">=3.10"
