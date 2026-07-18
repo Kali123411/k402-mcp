@@ -158,6 +158,39 @@ def session_status() -> dict:
     return http.get(f"{GATEWAY}/session/{sid}").json()
 
 @mcp.tool()
+def registry_search(capability: str = "", max_price_usd: float = 0.0,
+                    min_reputation_kas: float = 0.0, limit: int = 20) -> dict:
+    """Discover providers in the k402 service exchange — an open marketplace of agent-payable
+    services, each settled trustlessly over a Kaspa payment channel directly with the provider (no
+    custodian). Filter by capability (e.g. 'summarize', 'llm:reason', 'zk-prove'), max USD price,
+    and minimum reputation (settled KAS volume, chain-verified). Results are ranked reputation-first.
+    Free. Returns each provider's endpoint, payee pubkey, price, channel terms, and reputation."""
+    params = {"limit": limit}
+    if capability:
+        params["capability"] = capability
+    if max_price_usd:
+        params["max_price_usd"] = max_price_usd
+    if min_reputation_kas:
+        params["min_reputation_kas"] = min_reputation_kas
+    r = http.get(f"{GATEWAY}/registry/search", params=params)
+    try:
+        return r.json()
+    except Exception:
+        return {"error": f"registry unavailable (HTTP {r.status_code})"}
+
+@mcp.tool()
+def registry_provider(payee_pubkey: str) -> dict:
+    """Full detail on one provider in the service exchange by its payee pubkey: every service it
+    lists, its chain-verified reputation (settled KAS volume + settlement count), and its payee
+    address. Free."""
+    r = http.get(f"{GATEWAY}/registry/provider/{payee_pubkey}")
+    try:
+        out = r.json()
+    except Exception:
+        return {"error": f"registry unavailable (HTTP {r.status_code})"}
+    return out if r.status_code == 200 else {"error": "unknown provider", "gateway_said": out}
+
+@mcp.tool()
 def channel_config() -> dict:
     """Parameters for opening a kaspa-channel — a covenant-enforced payment channel that settles
     per-call vouchers on Kaspa L1 with NO custodian (the trustless alternative to a prepaid
