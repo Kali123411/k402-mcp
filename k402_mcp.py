@@ -15,6 +15,8 @@
 # Env: K402_GATEWAY (default: the public gateway), K402_SESSION (optional fixed session key),
 #      K402_STATE (session persistence, default ~/.k402/session.json),
 #      K402_MCP_TRANSPORT (stdio | streamable-http), K402_MCP_HOST / K402_MCP_PORT (HTTP mode)
+#      kUSD market (stdio only — it spends YOUR kUSD): K402_REGISTRY (default: the gateway),
+#      KUSD_PAY_BIN, KUSD_KEY_FILE (mode 600), KUSD_AUTHORITY, KUSD_NODE_URL, KUSD_RELAY_URL, KUSD_NETWORK
 import json, os, pathlib, weakref
 import httpx
 from mcp.server.fastmcp import FastMCP
@@ -159,13 +161,17 @@ def session_status() -> dict:
 
 @mcp.tool()
 def registry_search(capability: str = "", max_price_usd: float = 0.0,
-                    min_reputation_kas: float = 0.0, limit: int = 20) -> dict:
+                    min_reputation_kas: float = 0.0, limit: int = 20, currency: str = "") -> dict:
     """Discover providers in the k402 service exchange — an open marketplace of agent-payable
-    services, each settled trustlessly over a Kaspa payment channel directly with the provider (no
-    custodian). Filter by capability (e.g. 'summarize', 'llm:reason', 'zk-prove'), max USD price,
-    and minimum reputation (settled KAS volume, chain-verified). Results are ranked reputation-first.
-    Free. Returns each provider's endpoint, payee pubkey, price, channel terms, and reputation."""
+    services, each settled directly with the provider (no custodian): over a Kaspa payment channel,
+    or per call in kUSD (the covenant-native dollar on Kaspa). Filter by capability (e.g. 'summarize',
+    'llm:reason', 'zk-prove'), max USD price, minimum reputation (settled KAS volume, chain-verified),
+    and currency ('KAS' | 'kUSD'; kUSD listings carry price_cents and are ranked by settled cents).
+    Results are ranked reputation-first. Free. Returns each provider's endpoint, payee pubkey, price,
+    channel terms, and reputation. To pay a kUSD listing, use pay_kusd."""
     params = {"limit": limit}
+    if currency:
+        params["currency"] = currency
     if capability:
         params["capability"] = capability
     if max_price_usd:
@@ -250,6 +256,69 @@ def pay_per_call(endpoint: str, request_body: dict, scheme: str, payment_id: str
                 "reason": out.get("reason", "payment not verified yet"),
                 "note": "If you just paid, the tx may not be confirmed — retry pay_per_call in a moment."}
     return out
+
+# ------------------------------------------------------------------ the kUSD market (local wallet)
+_kusd_payer = None
+
+def _kusd():
+    """The agent's KusdPayer, built once from env. stdio only: it spends the kUSD behind KUSD_KEY_FILE, which
+    a shared HTTP process must never hold."""
+    global _kusd_payer
+    if HTTP_MODE:
+        raise RuntimeError("pay_kusd is only available in a local (stdio) k402-mcp: it spends your own kUSD wallet")
+    if _kusd_payer is None:
+        try:
+            from k402 import KusdPayer, KusdWallet
+        except ImportError as e:
+            raise RuntimeError("pay_kusd needs the k402 package: pip install 'k402-mcp[kusd]'") from e
+        missing = [k for k in ("KUSD_PAY_BIN", "KUSD_KEY_FILE", "KUSD_AUTHORITY") if not os.environ.get(k)]
+        if missing:
+            raise RuntimeError(f"pay_kusd needs {', '.join(missing)} in the environment (see the header of k402_mcp.py)")
+        wallet = KusdWallet(os.environ["KUSD_PAY_BIN"], key_file=os.path.expanduser(os.environ["KUSD_KEY_FILE"]),
+                            authority=os.environ["KUSD_AUTHORITY"], node_url=os.environ.get("KUSD_NODE_URL"),
+                            relay_url=os.environ.get("KUSD_RELAY_URL"), network=os.environ.get("KUSD_NETWORK", "testnet-10"))
+        _kusd_payer = KusdPayer(wallet, registry_url=os.environ.get("K402_REGISTRY", GATEWAY).rstrip("/"),
+                                network=wallet.network)
+    return _kusd_payer
+
+@mcp.tool()
+def pay_kusd(capability: str, request_body: dict, max_price_cents: int = 25, path: str = "",
+             policy: str = "registry") -> dict:
+    """Buy one call from the kUSD market: discover the providers listing `capability` for kUSD
+    (registry_search currency='kUSD'), rank them (policy: registry | cheapest | reputation), pay the
+    best one from YOUR kUSD wallet — at most `max_price_cents` — and return its result. The payment
+    is a kUSD box of exactly the quoted cents to the provider, on the x402 wire (PAYMENT-REQUIRED /
+    PAYMENT-SIGNATURE) or k402's kusd-utxo header; each payment also locks 1.5 KAS in the box (yours
+    to recover is the provider's) plus ~0.1 KAS fee, reported in `outlay`. If the wallet is short it
+    buys the shortfall + 50 cents through the kUSD PSM with your KAS. Fails over to the next provider
+    when one is dead. Local (stdio) k402-mcp only."""
+    import asyncio
+    try:
+        payer = _kusd()
+        route = asyncio.run(payer.pay_best(capability, path=path, json_body=request_body,
+                                           max_price_cents=max_price_cents, policy=policy))
+    except Exception as e:
+        return {"error": str(e)}
+    res = route.result
+    try:
+        out = route.response.json()
+    except Exception:
+        out = {"raw": route.response.text[:2000]}
+    return {"result": out, "provider": route.provider.get("payee_pubkey"), "endpoint": route.provider.get("endpoint"),
+            "paid": {"txid": res.txid, "cents": res.cents, "wire": res.wire,
+                     "outlay": {"price_cents": res.outlay.price_cents, "box_kas_sompi": res.outlay.box_kas_sompi,
+                                "fee_sompi_max": res.outlay.fee_sompi},
+                     "topped_up": res.topped_up},
+            "skipped": route.attempts}
+
+@mcp.tool()
+def kusd_balance() -> dict:
+    """Your kUSD market wallet: kUSD cents (and the boxes they sit in), KAS, and the payee key other
+    agents would pay. Local (stdio) k402-mcp only; free."""
+    try:
+        return _kusd().wallet.balance()
+    except Exception as e:
+        return {"error": str(e)}
 
 # ------------------------------------------------------------------ paid: text tools
 @mcp.tool()

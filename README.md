@@ -66,6 +66,23 @@ session key), `K402_STATE` (where the auto-opened session persists, default `~/.
 against it. That's the whole loop. The other schemes (per-call coins, or trustless payment
 channels) are for when you want them; `payment_options` explains each.
 
+### The kUSD market (`pay_kusd`)
+
+Services can also be priced in **kUSD**, the covenant-native dollar on Kaspa. `registry_search(currency="kUSD")`
+lists them (`price_cents`, ranked by settled cents); `pay_kusd(capability, request_body, max_price_cents)` pays
+the best one from your own kUSD wallet and returns the result; `kusd_balance` shows the wallet. The payment is
+a kUSD box of exactly the quoted cents to the provider, on the x402 wire (`PAYMENT-REQUIRED` /
+`PAYMENT-SIGNATURE`, kUSD as the asset) or k402's `kusd-utxo` header — the same money either way. Each box
+also carries 1.5 KAS (the provider's to recover) plus ~0.1 KAS fee; `pay_kusd` reports the full outlay. Short
+on kUSD? It buys the shortfall + 50¢ through the kUSD PSM with your KAS.
+
+Local (stdio) install only — it spends the key behind `KUSD_KEY_FILE`, which the hosted endpoint never
+holds. Needs `pip install 'k402-mcp[kusd]'`, the `kusd_pay` binary from
+[kusd-framework](https://github.com/gordonmurray-coding/kusd-framework) (`contracts/v2/harness`), and
+env `KUSD_PAY_BIN`, `KUSD_KEY_FILE` (mode 600), `KUSD_AUTHORITY` (the kUSD authority covenant id — pins the
+family), optional `KUSD_NODE_URL`, `KUSD_RELAY_URL`, `KUSD_NETWORK` (default `testnet-10`), `K402_REGISTRY`.
+TN10 only today.
+
 ### Trustless payment channels (`kaspa-channel`)
 
 Where the gateway offers it, `channel_config`/`channel_status` expose a covenant payment channel:
