@@ -90,7 +90,7 @@ payee key, the outlay, the checks, what your policy has left); `pay_kusd` to pay
 prove it counted — the registry's node-verified row, and with the offer's payee/cents/payment_id a second check
 on your own wallet's node; `list_service` / `delist_service` to sell (a listing signed with your wallet key, the
 10¢ kUSD fee paid through k402). These are the machine interfaces behind
-[kaspa-app.vercel.app/kusd/market](https://kaspa-app.vercel.app/kusd/market).
+[www.kaspa-402.org/market](https://www.kaspa-402.org/market).
 
 **The operator sets the bounds, not the agent.** `pay_kusd` only spends inside a `SpendPolicy` written by
 whoever funds the wallet, measured against a sqlite ledger so a restart never resets a budget:
