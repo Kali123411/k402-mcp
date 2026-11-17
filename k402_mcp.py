@@ -268,26 +268,54 @@ DEFAULT_SPEND_POLICY = {"max_per_call_cents": 25, "max_window_cents": 200, "max_
                         "max_window_topup_cents": 100, "max_window_failures": 2}
 
 
+_policy_seen = None   # (path, mtime_ns) the payer's policy was loaded from; None = the built-in default
+
+
 def _spend_ledger_path() -> str:
     return os.path.expanduser(os.environ.get("KUSD_SPEND_LEDGER") or "~/.kusd-market/spend.db")
 
 
+def _policy_source():
+    """(path, mtime_ns) of the operator's policy file, or (None, None) for the built-in default."""
+    path = os.environ.get("KUSD_SPEND_POLICY")
+    if not path:
+        return (None, None)
+    path = os.path.expanduser(path)
+    try:
+        return (path, os.stat(path).st_mtime_ns)
+    except OSError as e:
+        raise RuntimeError(f"cannot read the spend policy {path}: {e}") from e
+
+
+def _spend_policy():
+    from k402 import SpendPolicy
+    path, _ = _policy_source()
+    try:
+        return SpendPolicy.load(path) if path else SpendPolicy.from_dict(DEFAULT_SPEND_POLICY)
+    except (OSError, ValueError) as e:
+        raise RuntimeError(f"cannot read the spend policy {path}: {e}") from e
+
+
 def _spend_controls():
     """(SpendPolicy, SpendLedger) from the operator's env: the policy file replaces the default, it does not merge."""
-    from k402 import SpendLedger, SpendPolicy
-    path = os.environ.get("KUSD_SPEND_POLICY")
-    policy = SpendPolicy.load(os.path.expanduser(path)) if path else SpendPolicy.from_dict(DEFAULT_SPEND_POLICY)
+    from k402 import SpendLedger
     ledger_path = _spend_ledger_path()
     os.makedirs(os.path.dirname(ledger_path) or ".", exist_ok=True)
-    return policy, SpendLedger(ledger_path)
+    return _spend_policy(), SpendLedger(ledger_path)
 
 
 def _kusd():
     """The agent's KusdPayer, built once from env, inside the operator's SpendPolicy. stdio only: it spends the
     kUSD behind KUSD_KEY_FILE, which a shared HTTP process must never hold."""
-    global _kusd_payer
+    global _kusd_payer, _policy_seen
     if HTTP_MODE:
         raise RuntimeError("pay_kusd is only available in a local (stdio) k402-mcp: it spends your own kUSD wallet")
+    if _kusd_payer is not None:
+        src = _policy_source()
+        if src != _policy_seen:   # the operator edited (or added) the policy file: it applies to this call
+            _kusd_payer.policy = _spend_policy()
+            _policy_seen = src
+        return _kusd_payer
     if _kusd_payer is None:
         try:
             from k402 import KusdPayer, KusdWallet
@@ -302,6 +330,7 @@ def _kusd():
         policy, ledger = _spend_controls()
         _kusd_payer = KusdPayer(wallet, registry_url=os.environ.get("K402_REGISTRY", GATEWAY).rstrip("/"),
                                 network=wallet.network, policy=policy, ledger=ledger)
+        _policy_seen = _policy_source()
     return _kusd_payer
 
 @mcp.tool()
@@ -324,7 +353,11 @@ def pay_kusd(capability: str, request_body: dict, max_price_cents: int = 25, pat
                                            max_price_cents=max_price_cents, policy=policy))
     except Exception as e:
         out = {"error": str(e)}
-        if getattr(e, "code", None) and hasattr(e, "status"):   # k402.SpendRefused: the operator's bounds
+        try:
+            from k402 import SpendRefused
+        except ImportError:   # the error above already says k402 is missing
+            SpendRefused = ()
+        if isinstance(e, SpendRefused):   # the operator's bounds
             out.update(code=e.code, spend=e.status,
                        note="Refused by the wallet operator's spending policy; nothing was paid. Only the operator can change it.")
         return out

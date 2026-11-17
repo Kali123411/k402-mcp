@@ -17,6 +17,7 @@ def clean(monkeypatch, tmp_path):
     monkeypatch.delenv("KUSD_SPEND_POLICY", raising=False)
     monkeypatch.setenv("KUSD_SPEND_LEDGER", str(tmp_path / "spend.db"))
     monkeypatch.setattr(k402_mcp, "_kusd_payer", None)
+    monkeypatch.setattr(k402_mcp, "_policy_seen", None, raising=False)
     yield
 
 
@@ -69,3 +70,34 @@ def test_kusd_spend_status_tool(monkeypatch):
     monkeypatch.setattr(k402_mcp, "_kusd_payer", StubPayer(None))
     out = k402_mcp.kusd_spend_status()
     assert out["policy"] is None and "note" in out
+
+
+class FakeWallet:
+    """Stands in for k402.KusdWallet at construction time; never touches a chain."""
+    network = "testnet-10"
+    def __init__(self, *a, **kw):
+        pass
+
+
+def test_kusd_builds_the_payer_inside_the_policy_and_reloads_edits(monkeypatch, tmp_path):
+    import k402
+    import os as _os
+    monkeypatch.setattr(k402, "KusdWallet", FakeWallet)
+    for k, v in {"KUSD_PAY_BIN": "/bin/true", "KUSD_KEY_FILE": str(tmp_path / "k"), "KUSD_AUTHORITY": "06" * 32}.items():
+        monkeypatch.setenv(k, v)
+    payer = k402_mcp._kusd()
+    assert payer.policy == SpendPolicy.from_dict(k402_mcp.DEFAULT_SPEND_POLICY), "pay_kusd is bounded by the default when no file is set"
+    assert payer.ledger.path == str(tmp_path / "spend.db")
+    # the operator writes a policy file while the server runs: the next call sees it
+    f = tmp_path / "policy.json"
+    f.write_text(json.dumps({"max_per_call_cents": 5}))
+    monkeypatch.setenv("KUSD_SPEND_POLICY", str(f))
+    assert k402_mcp._kusd() is payer and payer.policy.max_per_call_cents == 5
+    f.write_text(json.dumps({"max_per_call_cents": 7}))
+    _os.utime(str(f), (1, 1))          # a different mtime, whatever the clock resolution
+    assert k402_mcp._kusd().policy.max_per_call_cents == 7
+    f.write_text("not json")
+    _os.utime(str(f), (2, 2))
+    with pytest.raises(RuntimeError, match="policy"):
+        k402_mcp._kusd()               # a broken edit refuses to pay rather than silently keeping the old bounds
+    assert "policy" in k402_mcp.pay_kusd("summarize", {"text": "x"})["error"]
