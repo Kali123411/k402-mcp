@@ -15,7 +15,7 @@
 # Env: K402_GATEWAY (default: the public gateway), K402_SESSION (optional fixed session key),
 #      K402_STATE (session persistence, default ~/.k402/session.json),
 #      K402_MCP_TRANSPORT (stdio | streamable-http), K402_MCP_HOST / K402_MCP_PORT (HTTP mode)
-#      kUSD market (stdio only — it spends YOUR kUSD): K402_REGISTRY (default: the gateway),
+#      Kaspa Agent Market: K402_REGISTRY (default https://market.kaspa-402.org); kUSD tools (stdio only — they spend YOUR kUSD):
 #      KUSD_PAY_BIN, KUSD_KEY_FILE (mode 600), KUSD_AUTHORITY, KUSD_NODE_URL, KUSD_RELAY_URL, KUSD_NETWORK
 #      KUSD_SPEND_POLICY (the operator's SpendPolicy, JSON file; default = DEFAULT_SPEND_POLICY below),
 #      KUSD_SPEND_LEDGER (sqlite; default ~/.kusd-market/spend.db) — the bounds pay_kusd cannot cross
@@ -24,6 +24,12 @@ import httpx
 from mcp.server.fastmcp import FastMCP
 
 GATEWAY = os.environ.get("K402_GATEWAY", "https://x402-compute.68cxgfyr0.workers.dev").rstrip("/")
+# The service registry (the Kaspa Agent Market): one registry for discovery, reputation and the settlements feed.
+DEFAULT_REGISTRY = "https://market.kaspa-402.org"
+
+
+def registry_base() -> str:
+    return os.environ.get("K402_REGISTRY", DEFAULT_REGISTRY).rstrip("/")
 STATE = pathlib.Path(os.environ.get("K402_STATE", os.path.expanduser("~/.k402/session.json")))
 
 # stdio (default) serves ONE user, so the session persists to K402_STATE. streamable-http is the
@@ -180,7 +186,7 @@ def registry_search(capability: str = "", max_price_usd: float = 0.0,
         params["max_price_usd"] = max_price_usd
     if min_reputation_kas:
         params["min_reputation_kas"] = min_reputation_kas
-    r = http.get(f"{GATEWAY}/registry/search", params=params)
+    r = http.get(f"{registry_base()}/registry/search", params=params)
     try:
         return r.json()
     except Exception:
@@ -188,15 +194,56 @@ def registry_search(capability: str = "", max_price_usd: float = 0.0,
 
 @mcp.tool()
 def registry_provider(payee_pubkey: str) -> dict:
-    """Full detail on one provider in the service exchange by its payee pubkey: every service it
-    lists, its chain-verified reputation (settled KAS volume + settlement count), and its payee
-    address. Free."""
-    r = http.get(f"{GATEWAY}/registry/provider/{payee_pubkey}")
+    """Full detail on one provider in the Kaspa Agent Market by its payee pubkey: every service it
+    lists, its reputation derived from chain-verified settlements (settled KAS, settled kUSD cents,
+    counts, first/last), and its payee address. Free."""
+    r = http.get(f"{registry_base()}/registry/provider/{payee_pubkey}")
     try:
         out = r.json()
     except Exception:
         return {"error": f"registry unavailable (HTTP {r.status_code})"}
-    return out if r.status_code == 200 else {"error": "unknown provider", "gateway_said": out}
+    return out if r.status_code == 200 else {"error": "unknown provider", "registry_said": out}
+
+@mcp.tool()
+def registry_activity(limit: int = 50) -> dict:
+    """The Kaspa Agent Market's settlements feed: kUSD payments the registry verified on its own node,
+    newest first (txid, box index, payee, cents, capability, time) and the all-time total. This is what
+    agents actually paid, not what anyone claimed. Free."""
+    r = http.get(f"{registry_base()}/registry/activity?limit={int(limit)}")
+    try:
+        return r.json()
+    except Exception:
+        return {"error": f"registry unavailable (HTTP {r.status_code})"}
+
+@mcp.tool()
+def verify_settlement(txid: str, payee_pubkey: str = "", cents: int = 0, payment_id: str = "") -> dict:
+    """Did a kUSD payment count? Two independent answers. `registry`: the Kaspa Agent Market's verified
+    settlement row(s) for the txid (it checked the box on its own node before recording it), or
+    verified:false when it has none. `node`: when you also give the offer's payee_pubkey, cents and
+    payment_id and this k402-mcp has a local kUSD wallet (stdio), the box is checked again on the wallet's
+    node — an unspent kUSD box of exactly those cents, owned by the listed key tweaked by the payment_id,
+    carrying the family's covenant id. Free; never pays anything."""
+    t = str(txid).lower()
+    if len(t) != 64 or any(c not in "0123456789abcdef" for c in t):
+        return {"error": "txid must be 64 hex characters"}
+    r = http.get(f"{registry_base()}/registry/settled/{t}")
+    try:
+        body = r.json()
+    except Exception:
+        body = {"error": f"registry unavailable (HTTP {r.status_code})"}
+    registry = body if r.status_code == 200 else {"verified": False, "txid": t, "registry_said": body}
+    node = None
+    if payee_pubkey and cents and payment_id:
+        try:
+            from k402.kusd_keys import derive_payee
+            payer = _kusd()
+            box_owner = derive_payee(payee_pubkey.lower(), payment_id)
+            v = payer.wallet.verify(t, box_owner, int(cents), payer.wallet.family().authority, 0)
+            node = {"ok": bool(v.ok), "reason": v.reason, "index": v.index, "daa": v.daa, "retryable": bool(v.retryable),
+                    "box_owner": box_owner, "cents": int(cents)}
+        except Exception as e:
+            node = {"error": str(e)}
+    return {"txid": t, "registry": registry, "node": node}
 
 @mcp.tool()
 def channel_config() -> dict:
@@ -328,8 +375,7 @@ def _kusd():
                             authority=os.environ["KUSD_AUTHORITY"], node_url=os.environ.get("KUSD_NODE_URL"),
                             relay_url=os.environ.get("KUSD_RELAY_URL"), network=os.environ.get("KUSD_NETWORK", "testnet-10"))
         policy, ledger = _spend_controls()
-        _kusd_payer = KusdPayer(wallet, registry_url=os.environ.get("K402_REGISTRY", GATEWAY).rstrip("/"),
-                                network=wallet.network, policy=policy, ledger=ledger)
+        _kusd_payer = KusdPayer(wallet, registry_url=registry_base(), network=wallet.network, policy=policy, ledger=ledger)
         _policy_seen = _policy_source()
     return _kusd_payer
 
@@ -372,6 +418,114 @@ def pay_kusd(capability: str, request_body: dict, max_price_cents: int = 25, pat
                                 "fee_sompi_max": res.outlay.fee_sompi},
                      "topped_up": res.topped_up},
             "skipped": route.attempts}
+
+def _refusal(e: Exception) -> dict:
+    """An exception from the kUSD payer as a tool answer: refusals carry their code, nothing was paid."""
+    out = {"error": str(e), "paid": False}
+    try:
+        from k402 import KusdPaymentSent, SpendRefused
+    except ImportError:
+        return out
+    if isinstance(e, SpendRefused):
+        out.update(code=e.code, spend=e.status, note="Refused by the wallet operator's spending policy; nothing was paid. Only the operator can change it.")
+    elif isinstance(e, KusdPaymentSent):
+        out.update(paid=True, txid=e.txid, cents=e.cents, status=e.status,
+                   note="The box was built and broadcast but the call was not served; do not pay anyone else for this call without deciding what to do about it.")
+    return out
+
+@mcp.tool()
+def get_quote(capability: str = "", request_body: dict = None, endpoint: str = "", payee_pubkey: str = "",
+              path: str = "", max_price_cents: int = 25, policy: str = "registry") -> dict:
+    """What one call would cost, fully checked, with NOTHING paid. Give a `capability` (the best listing on the
+    Kaspa Agent Market is quoted, ranked by `policy`: registry | cheapest | reputation) or an `endpoint` (+ its
+    listed `payee_pubkey` so the quote can be checked against it). Fetches the provider's 402 and returns the
+    kUSD requirement: cents, the per-offer payee key, payment_id, wire, the full outlay (cents + 1.5 KAS in the
+    box + fee), the checks that passed (our family, our network, payTo = the listed key tweaked by the offer,
+    price within the cap) and what the operator's policy has left. A quote the policy or the checks refuse
+    comes back as {error, code}. Local (stdio) k402-mcp only."""
+    import asyncio
+    try:
+        payer = _kusd()
+        if endpoint:
+            provider = {"endpoint": endpoint, "payee_pubkey": payee_pubkey, "capability": capability}
+        else:
+            found = payer.rank(asyncio.run(payer.discover(capability, max_price_cents=max_price_cents)), policy)
+            if not found:
+                return {"error": f"no kUSD provider lists {capability!r} on {registry_base()}", "paid": False}
+            provider = found[0]
+        q = asyncio.run(payer.quote(provider, path, request_body or {}, max_price_cents=max_price_cents))
+    except Exception as e:
+        return _refusal(e)
+    if q is None:
+        return {"free": True, "paid": False, "endpoint": provider.get("endpoint"), "note": "the endpoint served the call without asking for payment"}
+    return {"paid": False, "cents": q.cents, "pay_to": q.pay_to, "payment_id": q.payment_id, "wire": q.wire, "network": q.network,
+            "authority": q.authority, "endpoint": q.url or provider.get("endpoint"), "provider": provider.get("payee_pubkey"),
+            "capability": provider.get("capability", capability),
+            "outlay": {"price_cents": q.outlay.price_cents, "box_kas_sompi": q.outlay.box_kas_sompi, "fee_sompi_max": q.outlay.fee_sompi},
+            "checks": {"asset_is_our_family": True, "network_matches": True,
+                       "payee_is_listed_key_tweaked_by_offer": bool(provider.get("payee_pubkey")), "price_within_cap": True},
+            "spend": payer.spend_status(),
+            "next": "pay_kusd(capability, request_body) pays it under the same checks and the operator's policy"}
+
+def _wallet_secret() -> str:
+    path = os.path.expanduser(os.environ.get("KUSD_KEY_FILE", ""))
+    if not path:
+        raise RuntimeError("list_service needs KUSD_KEY_FILE (the wallet key signs the listing)")
+    secret = open(path, encoding="utf-8").read().strip().lower()
+    if len(secret) != 64 or any(c not in "0123456789abcdef" for c in secret):
+        raise RuntimeError("KUSD_KEY_FILE is not a 32-byte hex key")
+    return secret
+
+def _signed_listing(capability: str, endpoint: str, price_cents: int, description: str, meta: dict = None):
+    from k402.registry import Listing
+    if not isinstance(endpoint, str) or not endpoint.startswith(("https://", "http://")):
+        raise ValueError("endpoint must be an http(s) URL — the 402-gated resource agents POST to")
+    if not isinstance(price_cents, int) or price_cents <= 0:
+        raise ValueError("price_cents must be a positive integer (kUSD cents per call)")
+    if not capability or not isinstance(capability, str):
+        raise ValueError("capability is required (e.g. summarize)")
+    payer = _kusd()
+    listing = Listing(capability=capability, endpoint=endpoint, payee_pubkey=payer.wallet.payee_xonly(), price_usd=price_cents / 100,
+                      network=payer.network, schemes=["kusd-utxo"], currency="kUSD", price_cents=int(price_cents),
+                      description=description or "", meta=meta or {"wires": ["x402", "k402"]})
+    return payer, listing.sign(_wallet_secret())
+
+@mcp.tool()
+def list_service(capability: str, endpoint: str, price_cents: int, description: str = "", max_fee_cents: int = 25,
+                 meta: dict = None) -> dict:
+    """Sell on the Kaspa Agent Market: publish a kUSD-priced listing for YOUR 402-gated endpoint. The listing is
+    signed with your kUSD wallet key (so payments reach you and nobody else can list as you) and the registry's
+    listing fee (10¢ of kUSD on TN10) is paid through k402 from your wallet, inside the operator's policy. The
+    endpoint must answer an unpaid request with a 402 carrying a kUSD requirement (k402's K402(kusd=…) does
+    this). Returns the listing as stored, the registry's answer and the fee payment. Local (stdio) only."""
+    import asyncio
+    try:
+        payer, listing = _signed_listing(capability, endpoint, int(price_cents), description, meta)
+        res = asyncio.run(payer.pay({"endpoint": f"{registry_base()}/registry/list", "capability": "registry listing"},
+                                    json_body=listing.to_dict(), max_price_cents=max_fee_cents))
+    except Exception as e:
+        return _refusal(e)
+    try:
+        answer = res.response.json()
+    except Exception:
+        answer = {"raw": res.response.text[:500]}
+    return {"listed": listing.to_dict(), "registry": answer, "fee": {"txid": res.txid, "cents": res.cents, "wire": res.wire},
+            "next": "answer every unpaid request with a 402; report each verified payment to /registry/settled so your reputation grows"}
+
+@mcp.tool()
+def delist_service(capability: str, endpoint: str, price_cents: int, description: str = "") -> dict:
+    """Remove YOUR listing from the Kaspa Agent Market: a signed DELETE with the same listing body (same
+    capability, endpoint, price, description), signed by your kUSD wallet key. Free. Local (stdio) only."""
+    try:
+        _, listing = _signed_listing(capability, endpoint, int(price_cents), description)
+    except Exception as e:
+        return _refusal(e)
+    r = http.request("DELETE", f"{registry_base()}/registry/list", json=listing.to_dict())
+    try:
+        out = r.json()
+    except Exception:
+        out = {"error": f"registry answered HTTP {r.status_code}"}
+    return out if r.status_code == 200 else {"error": "delist refused", "registry_said": out}
 
 @mcp.tool()
 def kusd_balance() -> dict:
