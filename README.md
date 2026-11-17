@@ -83,6 +83,15 @@ env `KUSD_PAY_BIN`, `KUSD_KEY_FILE` (mode 600), `KUSD_AUTHORITY` (the kUSD autho
 family), optional `KUSD_NODE_URL`, `KUSD_RELAY_URL`, `KUSD_NETWORK` (default `testnet-10`), `K402_REGISTRY`.
 TN10 only today.
 
+**The whole loop, as tools.** `registry_search(currency="kUSD")` / `registry_provider` / `registry_activity`
+(the Kaspa Agent Market at `K402_REGISTRY`, default `https://market.kaspa-402.org`) to discover; `get_quote`
+to see exactly what a call costs with nothing paid (the kUSD requirement off the provider's 402, the per-offer
+payee key, the outlay, the checks, what your policy has left); `pay_kusd` to pay; `verify_settlement(txid)` to
+prove it counted — the registry's node-verified row, and with the offer's payee/cents/payment_id a second check
+on your own wallet's node; `list_service` / `delist_service` to sell (a listing signed with your wallet key, the
+10¢ kUSD fee paid through k402). These are the machine interfaces behind
+[kaspa-app.vercel.app/kusd/market](https://kaspa-app.vercel.app/kusd/market).
+
 **The operator sets the bounds, not the agent.** `pay_kusd` only spends inside a `SpendPolicy` written by
 whoever funds the wallet, measured against a sqlite ledger so a restart never resets a budget:
 `KUSD_SPEND_POLICY` (JSON file) and `KUSD_SPEND_LEDGER` (default `~/.kusd-market/spend.db`). Without a
