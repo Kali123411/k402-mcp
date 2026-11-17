@@ -254,3 +254,40 @@ def test_paid_tools_are_async_so_fastmcp_can_run_them_in_its_loop():
     import inspect
     for name in ("pay_kusd", "get_quote", "list_service"):
         assert inspect.iscoroutinefunction(getattr(k402_mcp, name)), name
+
+
+def test_get_quote_by_endpoint_resolves_the_capability_from_the_registry(monkeypatch):
+    # an endpoint alone would reach the policy gate as "a provider naming no capability" and be refused by an
+    # allow_capabilities policy; the tool asks the registry which capability that endpoint is listed under
+    prov_listing = {"payee_pubkey": "ab" * 32, "listings": [{"capability": "summarize", "endpoint": "https://p.test/summarize", "price_cents": 5}]}
+    monkeypatch.setattr(k402_mcp, "http", FakeHttp({"/registry/provider/" + "ab" * 32: (200, prov_listing)}))
+    seen = {}
+    class P(QuotePayer):
+        async def quote(self, provider, path="", json_body=None, max_price_cents=None):
+            seen.update(provider)
+            return _quote()
+    monkeypatch.setattr(k402_mcp, "_kusd_payer", P())
+    out = asyncio.run(k402_mcp.get_quote(endpoint="https://p.test/summarize", payee_pubkey="ab" * 32))
+    assert seen["capability"] == "summarize" and out["capability"] == "summarize" and out["cents"] == 5
+
+
+def test_verify_settlement_waits_while_the_node_says_not_indexed_yet(monkeypatch):
+    from k402.kusd import Family, VerifyResult
+    answers = [VerifyResult(ok=False, reason="not indexed yet", index=None, daa=None, retryable=True),
+               VerifyResult(ok=False, reason="not indexed yet", index=None, daa=None, retryable=True),
+               VerifyResult(ok=True, reason="", index=0, daa=624_000_100, retryable=False)]
+    class W:
+        def verify(self, *a):
+            return answers.pop(0)
+        def family(self):
+            return Family(authority="06" * 32, borrow_guard="00" * 32, ext="ac" * 32, network="testnet-10")
+    monkeypatch.setattr(k402_mcp, "_kusd_payer", type("P", (), {"wallet": W()})())
+    monkeypatch.setattr(k402_mcp, "http", FakeHttp({"/registry/settled/": (404, {"error": "none"})}))
+    slept = []
+    monkeypatch.setattr(k402_mcp.time, "sleep", lambda s: slept.append(s))
+    out = k402_mcp.verify_settlement("d3" * 32, payee_pubkey="ab" * 32, cents=5, payment_id="p_1", wait_seconds=30)
+    assert out["node"]["ok"] is True and out["node"]["attempts"] == 3 and sum(slept) <= 30
+    # with no wait, one answer, honestly retryable
+    answers[:] = [VerifyResult(ok=False, reason="not indexed yet", index=None, daa=None, retryable=True)]
+    out = k402_mcp.verify_settlement("d3" * 32, payee_pubkey="ab" * 32, cents=5, payment_id="p_1", wait_seconds=0)
+    assert out["node"]["ok"] is False and out["node"]["retryable"] is True

@@ -19,7 +19,7 @@
 #      KUSD_PAY_BIN, KUSD_KEY_FILE (mode 600), KUSD_AUTHORITY, KUSD_NODE_URL, KUSD_RELAY_URL, KUSD_NETWORK
 #      KUSD_SPEND_POLICY (the operator's SpendPolicy, JSON file; default = DEFAULT_SPEND_POLICY below),
 #      KUSD_SPEND_LEDGER (sqlite; default ~/.kusd-market/spend.db) — the bounds pay_kusd cannot cross
-import json, os, pathlib, weakref
+import json, os, pathlib, time, weakref
 import httpx
 from mcp.server.fastmcp import FastMCP
 
@@ -216,13 +216,14 @@ def registry_activity(limit: int = 50) -> dict:
         return {"error": f"registry unavailable (HTTP {r.status_code})"}
 
 @mcp.tool()
-def verify_settlement(txid: str, payee_pubkey: str = "", cents: int = 0, payment_id: str = "") -> dict:
+def verify_settlement(txid: str, payee_pubkey: str = "", cents: int = 0, payment_id: str = "", wait_seconds: int = 30) -> dict:
     """Did a kUSD payment count? Two independent answers. `registry`: the Kaspa Agent Market's verified
     settlement row(s) for the txid (it checked the box on its own node before recording it), or
     verified:false when it has none. `node`: when you also give the offer's payee_pubkey, cents and
     payment_id and this k402-mcp has a local kUSD wallet (stdio), the box is checked again on the wallet's
     node — an unspent kUSD box of exactly those cents, owned by the listed key tweaked by the payment_id,
-    carrying the family's covenant id. Free; never pays anything."""
+    carrying the family's covenant id. A box the node has not indexed yet is asked again for up to `wait_seconds`
+    (the index lags a broadcast by a few seconds). Free; never pays anything."""
     t = str(txid).lower()
     if len(t) != 64 or any(c not in "0123456789abcdef" for c in t):
         return {"error": "txid must be 64 hex characters"}
@@ -238,9 +239,16 @@ def verify_settlement(txid: str, payee_pubkey: str = "", cents: int = 0, payment
             from k402.kusd_keys import derive_payee
             payer = _kusd()
             box_owner = derive_payee(payee_pubkey.lower(), payment_id)
-            v = payer.wallet.verify(t, box_owner, int(cents), payer.wallet.family().authority, 0)
+            authority = payer.wallet.family().authority
+            deadline, attempts = time.monotonic() + max(0, int(wait_seconds)), 0
+            while True:
+                attempts += 1
+                v = payer.wallet.verify(t, box_owner, int(cents), authority, 0)
+                if v.ok or not v.retryable or time.monotonic() >= deadline:
+                    break
+                time.sleep(min(5, max(0.1, deadline - time.monotonic())))
             node = {"ok": bool(v.ok), "reason": v.reason, "index": v.index, "daa": v.daa, "retryable": bool(v.retryable),
-                    "box_owner": box_owner, "cents": int(cents)}
+                    "box_owner": box_owner, "cents": int(cents), "attempts": attempts}
         except Exception as e:
             node = {"error": str(e)}
     return {"txid": t, "registry": registry, "node": node}
@@ -446,7 +454,8 @@ async def get_quote(capability: str = "", request_body: dict = None, endpoint: s
     try:
         payer = _kusd()
         if endpoint:
-            provider = {"endpoint": endpoint, "payee_pubkey": payee_pubkey, "capability": capability}
+            cap = capability or _capability_of(payee_pubkey, endpoint)
+            provider = {"endpoint": endpoint, "payee_pubkey": payee_pubkey, "capability": cap}
         else:
             found = payer.rank(await payer.discover(capability, max_price_cents=max_price_cents), policy)
             if not found:
@@ -465,6 +474,20 @@ async def get_quote(capability: str = "", request_body: dict = None, endpoint: s
                        "payee_is_listed_key_tweaked_by_offer": bool(provider.get("payee_pubkey")), "price_within_cap": True},
             "spend": payer.spend_status(),
             "next": "pay_kusd(capability, request_body) pays it under the same checks and the operator's policy"}
+
+def _capability_of(payee_pubkey: str, endpoint: str) -> str:
+    """Which capability the registry lists `endpoint` under for this provider ("" when unknown)."""
+    if not payee_pubkey:
+        return ""
+    try:
+        r = http.get(f"{registry_base()}/registry/provider/{payee_pubkey.lower()}")
+        for l in (r.json().get("listings") or []):
+            if l.get("endpoint") == endpoint:
+                return l.get("capability", "")
+    except Exception:
+        pass
+    return ""
+
 
 def _wallet_secret() -> str:
     path = os.path.expanduser(os.environ.get("KUSD_KEY_FILE", ""))
