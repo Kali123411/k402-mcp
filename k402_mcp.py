@@ -380,8 +380,8 @@ def _kusd():
     return _kusd_payer
 
 @mcp.tool()
-def pay_kusd(capability: str, request_body: dict, max_price_cents: int = 25, path: str = "",
-             policy: str = "registry") -> dict:
+async def pay_kusd(capability: str, request_body: dict, max_price_cents: int = 25, path: str = "",
+                   policy: str = "registry") -> dict:
     """Buy one call from the kUSD market: discover the providers listing `capability` for kUSD
     (registry_search currency='kUSD'), rank them (policy: registry | cheapest | reputation), pay the
     best one from YOUR kUSD wallet — at most `max_price_cents` — and return its result. The payment
@@ -392,11 +392,11 @@ def pay_kusd(capability: str, request_body: dict, max_price_cents: int = 25, pat
     when one is dead. Every payment stays inside the bounds the wallet's OPERATOR set (per-call ceiling,
     budgets, rate, top-up cap, allowlists, freeze — see kusd_spend_status); a refusal returns
     {"error", "code", "spend"} and nothing was paid. Local (stdio) k402-mcp only."""
-    import asyncio
+    # async: FastMCP runs tools inside its event loop, so the payer is awaited, never asyncio.run()
     try:
         payer = _kusd()
-        route = asyncio.run(payer.pay_best(capability, path=path, json_body=request_body,
-                                           max_price_cents=max_price_cents, policy=policy))
+        route = await payer.pay_best(capability, path=path, json_body=request_body,
+                                     max_price_cents=max_price_cents, policy=policy)
     except Exception as e:
         out = {"error": str(e)}
         try:
@@ -434,8 +434,8 @@ def _refusal(e: Exception) -> dict:
     return out
 
 @mcp.tool()
-def get_quote(capability: str = "", request_body: dict = None, endpoint: str = "", payee_pubkey: str = "",
-              path: str = "", max_price_cents: int = 25, policy: str = "registry") -> dict:
+async def get_quote(capability: str = "", request_body: dict = None, endpoint: str = "", payee_pubkey: str = "",
+                    path: str = "", max_price_cents: int = 25, policy: str = "registry") -> dict:
     """What one call would cost, fully checked, with NOTHING paid. Give a `capability` (the best listing on the
     Kaspa Agent Market is quoted, ranked by `policy`: registry | cheapest | reputation) or an `endpoint` (+ its
     listed `payee_pubkey` so the quote can be checked against it). Fetches the provider's 402 and returns the
@@ -443,17 +443,16 @@ def get_quote(capability: str = "", request_body: dict = None, endpoint: str = "
     box + fee), the checks that passed (our family, our network, payTo = the listed key tweaked by the offer,
     price within the cap) and what the operator's policy has left. A quote the policy or the checks refuse
     comes back as {error, code}. Local (stdio) k402-mcp only."""
-    import asyncio
     try:
         payer = _kusd()
         if endpoint:
             provider = {"endpoint": endpoint, "payee_pubkey": payee_pubkey, "capability": capability}
         else:
-            found = payer.rank(asyncio.run(payer.discover(capability, max_price_cents=max_price_cents)), policy)
+            found = payer.rank(await payer.discover(capability, max_price_cents=max_price_cents), policy)
             if not found:
                 return {"error": f"no kUSD provider lists {capability!r} on {registry_base()}", "paid": False}
             provider = found[0]
-        q = asyncio.run(payer.quote(provider, path, request_body or {}, max_price_cents=max_price_cents))
+        q = await payer.quote(provider, path, request_body or {}, max_price_cents=max_price_cents)
     except Exception as e:
         return _refusal(e)
     if q is None:
@@ -491,18 +490,17 @@ def _signed_listing(capability: str, endpoint: str, price_cents: int, descriptio
     return payer, listing.sign(_wallet_secret())
 
 @mcp.tool()
-def list_service(capability: str, endpoint: str, price_cents: int, description: str = "", max_fee_cents: int = 25,
-                 meta: dict = None) -> dict:
+async def list_service(capability: str, endpoint: str, price_cents: int, description: str = "", max_fee_cents: int = 25,
+                       meta: dict = None) -> dict:
     """Sell on the Kaspa Agent Market: publish a kUSD-priced listing for YOUR 402-gated endpoint. The listing is
     signed with your kUSD wallet key (so payments reach you and nobody else can list as you) and the registry's
     listing fee (10¢ of kUSD on TN10) is paid through k402 from your wallet, inside the operator's policy. The
     endpoint must answer an unpaid request with a 402 carrying a kUSD requirement (k402's K402(kusd=…) does
     this). Returns the listing as stored, the registry's answer and the fee payment. Local (stdio) only."""
-    import asyncio
     try:
         payer, listing = _signed_listing(capability, endpoint, int(price_cents), description, meta)
-        res = asyncio.run(payer.pay({"endpoint": f"{registry_base()}/registry/list", "capability": "registry listing"},
-                                    json_body=listing.to_dict(), max_price_cents=max_fee_cents))
+        res = await payer.pay({"endpoint": f"{registry_base()}/registry/list", "capability": "registry listing"},
+                              json_body=listing.to_dict(), max_price_cents=max_fee_cents)
     except Exception as e:
         return _refusal(e)
     try:
