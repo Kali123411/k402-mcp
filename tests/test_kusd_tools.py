@@ -291,3 +291,24 @@ def test_verify_settlement_waits_while_the_node_says_not_indexed_yet(monkeypatch
     answers[:] = [VerifyResult(ok=False, reason="not indexed yet", index=None, daa=None, retryable=True)]
     out = k402_mcp.verify_settlement("d3" * 32, payee_pubkey="ab" * 32, cents=5, payment_id="p_1", wait_seconds=0)
     assert out["node"]["ok"] is False and out["node"]["retryable"] is True
+
+
+def test_pay_kusd_reports_the_paid_offers_payment_id_for_verification(monkeypatch):
+    from k402.kusd_client import Outlay, PayResult
+    class R:
+        status_code = 200
+        text = "{}"
+        def json(self):
+            return {"summary": "…"}
+    class Route:
+        provider = {"payee_pubkey": "ab" * 32, "endpoint": "https://p.test/summarize"}
+        attempts = []
+        response = R()
+        result = PayResult(response=R(), txid="f1" * 32, cents=5, wire="x402", outlay=Outlay(5), payment_id="p_paid", pay_to="cd" * 32)
+    class P:
+        async def pay_best(self, *a, **kw):
+            return Route()
+    monkeypatch.setattr(k402_mcp, "_kusd_payer", P())
+    out = asyncio.run(k402_mcp.pay_kusd("summarize", {"text": "x"}))
+    assert out["paid"]["payment_id"] == "p_paid" and out["paid"]["pay_to"] == "cd" * 32
+    assert "payment_id='p_paid'" in out["verify"]

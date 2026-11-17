@@ -421,11 +421,12 @@ async def pay_kusd(capability: str, request_body: dict, max_price_cents: int = 2
     except Exception:
         out = {"raw": route.response.text[:2000]}
     return {"result": out, "provider": route.provider.get("payee_pubkey"), "endpoint": route.provider.get("endpoint"),
-            "paid": {"txid": res.txid, "cents": res.cents, "wire": res.wire,
+            "paid": {"txid": res.txid, "cents": res.cents, "wire": res.wire, "payment_id": res.payment_id, "pay_to": res.pay_to,
                      "outlay": {"price_cents": res.outlay.price_cents, "box_kas_sompi": res.outlay.box_kas_sompi,
                                 "fee_sompi_max": res.outlay.fee_sompi},
                      "topped_up": res.topped_up},
-            "skipped": route.attempts}
+            "skipped": route.attempts,
+            "verify": f"verify_settlement(txid, payee_pubkey={route.provider.get('payee_pubkey')!r}, cents={res.cents}, payment_id={res.payment_id!r}) — the box's key is derived from THIS payment_id, not a previous quote's"}
 
 def _refusal(e: Exception) -> dict:
     """An exception from the kUSD payer as a tool answer: refusals carry their code, nothing was paid."""
@@ -473,7 +474,7 @@ async def get_quote(capability: str = "", request_body: dict = None, endpoint: s
             "checks": {"asset_is_our_family": True, "network_matches": True,
                        "payee_is_listed_key_tweaked_by_offer": bool(provider.get("payee_pubkey")), "price_within_cap": True},
             "spend": payer.spend_status(),
-            "next": "pay_kusd(capability, request_body) pays it under the same checks and the operator's policy"}
+            "next": "pay_kusd(capability, request_body) pays it under the same checks and the operator's policy; the payment fetches its own 402, so verify with the payment_id pay_kusd returns, not this one"}
 
 def _capability_of(payee_pubkey: str, endpoint: str) -> str:
     """Which capability the registry lists `endpoint` under for this provider ("" when unknown)."""
