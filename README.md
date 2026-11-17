@@ -83,6 +83,22 @@ env `KUSD_PAY_BIN`, `KUSD_KEY_FILE` (mode 600), `KUSD_AUTHORITY` (the kUSD autho
 family), optional `KUSD_NODE_URL`, `KUSD_RELAY_URL`, `KUSD_NETWORK` (default `testnet-10`), `K402_REGISTRY`.
 TN10 only today.
 
+**The operator sets the bounds, not the agent.** `pay_kusd` only spends inside a `SpendPolicy` written by
+whoever funds the wallet, measured against a sqlite ledger so a restart never resets a budget:
+`KUSD_SPEND_POLICY` (JSON file) and `KUSD_SPEND_LEDGER` (default `~/.kusd-market/spend.db`). Without a
+policy file the server applies a conservative default — 25¢ per call, 200¢ and 20 calls per hour, 100¢ of
+PSM top-ups per hour, stop after 2 unserved payments in an hour. Fields (all optional): `max_per_call_cents`,
+`max_total_cents`, `window_seconds`, `max_window_cents`, `max_window_calls`, `max_window_topup_cents` (`0` =
+never convert KAS), `max_window_failures`, `allow_payees`, `allow_capabilities`, `require_listed_payee`. The
+agent's own `max_price_cents` can only tighten the per-call ceiling. A refused call returns
+`{"error", "code", "spend"}` and paid nothing; `kusd_spend_status` (free) shows what is left. The kill
+switch and the policy are the operator's alone, from the `k402-spend` CLI in the `k402` package:
+
+```
+k402-spend --ledger ~/.kusd-market/spend.db --policy ~/.kusd-market/policy.json status
+k402-spend --ledger ~/.kusd-market/spend.db freeze      # every pay_kusd refused until unfreeze
+```
+
 ### Trustless payment channels (`kaspa-channel`)
 
 Where the gateway offers it, `channel_config`/`channel_status` expose a covenant payment channel:
