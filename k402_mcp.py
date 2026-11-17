@@ -17,6 +17,8 @@
 #      K402_MCP_TRANSPORT (stdio | streamable-http), K402_MCP_HOST / K402_MCP_PORT (HTTP mode)
 #      kUSD market (stdio only — it spends YOUR kUSD): K402_REGISTRY (default: the gateway),
 #      KUSD_PAY_BIN, KUSD_KEY_FILE (mode 600), KUSD_AUTHORITY, KUSD_NODE_URL, KUSD_RELAY_URL, KUSD_NETWORK
+#      KUSD_SPEND_POLICY (the operator's SpendPolicy, JSON file; default = DEFAULT_SPEND_POLICY below),
+#      KUSD_SPEND_LEDGER (sqlite; default ~/.kusd-market/spend.db) — the bounds pay_kusd cannot cross
 import json, os, pathlib, weakref
 import httpx
 from mcp.server.fastmcp import FastMCP
@@ -260,12 +262,60 @@ def pay_per_call(endpoint: str, request_body: dict, scheme: str, payment_id: str
 # ------------------------------------------------------------------ the kUSD market (local wallet)
 _kusd_payer = None
 
+# What pay_kusd may spend when the operator has not written a policy (KUSD_SPEND_POLICY): a few dollars an hour at
+# most. The operator raises or lowers it with a policy file; the agent cannot touch it from a tool call.
+DEFAULT_SPEND_POLICY = {"max_per_call_cents": 25, "max_window_cents": 200, "max_window_calls": 20,
+                        "max_window_topup_cents": 100, "max_window_failures": 2}
+
+
+_policy_seen = None   # (path, mtime_ns) the payer's policy was loaded from; None = the built-in default
+
+
+def _spend_ledger_path() -> str:
+    return os.path.expanduser(os.environ.get("KUSD_SPEND_LEDGER") or "~/.kusd-market/spend.db")
+
+
+def _policy_source():
+    """(path, mtime_ns) of the operator's policy file, or (None, None) for the built-in default."""
+    path = os.environ.get("KUSD_SPEND_POLICY")
+    if not path:
+        return (None, None)
+    path = os.path.expanduser(path)
+    try:
+        return (path, os.stat(path).st_mtime_ns)
+    except OSError as e:
+        raise RuntimeError(f"cannot read the spend policy {path}: {e}") from e
+
+
+def _spend_policy():
+    from k402 import SpendPolicy
+    path, _ = _policy_source()
+    try:
+        return SpendPolicy.load(path) if path else SpendPolicy.from_dict(DEFAULT_SPEND_POLICY)
+    except (OSError, ValueError) as e:
+        raise RuntimeError(f"cannot read the spend policy {path}: {e}") from e
+
+
+def _spend_controls():
+    """(SpendPolicy, SpendLedger) from the operator's env: the policy file replaces the default, it does not merge."""
+    from k402 import SpendLedger
+    ledger_path = _spend_ledger_path()
+    os.makedirs(os.path.dirname(ledger_path) or ".", exist_ok=True)
+    return _spend_policy(), SpendLedger(ledger_path)
+
+
 def _kusd():
-    """The agent's KusdPayer, built once from env. stdio only: it spends the kUSD behind KUSD_KEY_FILE, which
-    a shared HTTP process must never hold."""
-    global _kusd_payer
+    """The agent's KusdPayer, built once from env, inside the operator's SpendPolicy. stdio only: it spends the
+    kUSD behind KUSD_KEY_FILE, which a shared HTTP process must never hold."""
+    global _kusd_payer, _policy_seen
     if HTTP_MODE:
         raise RuntimeError("pay_kusd is only available in a local (stdio) k402-mcp: it spends your own kUSD wallet")
+    if _kusd_payer is not None:
+        src = _policy_source()
+        if src != _policy_seen:   # the operator edited (or added) the policy file: it applies to this call
+            _kusd_payer.policy = _spend_policy()
+            _policy_seen = src
+        return _kusd_payer
     if _kusd_payer is None:
         try:
             from k402 import KusdPayer, KusdWallet
@@ -277,8 +327,10 @@ def _kusd():
         wallet = KusdWallet(os.environ["KUSD_PAY_BIN"], key_file=os.path.expanduser(os.environ["KUSD_KEY_FILE"]),
                             authority=os.environ["KUSD_AUTHORITY"], node_url=os.environ.get("KUSD_NODE_URL"),
                             relay_url=os.environ.get("KUSD_RELAY_URL"), network=os.environ.get("KUSD_NETWORK", "testnet-10"))
+        policy, ledger = _spend_controls()
         _kusd_payer = KusdPayer(wallet, registry_url=os.environ.get("K402_REGISTRY", GATEWAY).rstrip("/"),
-                                network=wallet.network)
+                                network=wallet.network, policy=policy, ledger=ledger)
+        _policy_seen = _policy_source()
     return _kusd_payer
 
 @mcp.tool()
@@ -291,14 +343,24 @@ def pay_kusd(capability: str, request_body: dict, max_price_cents: int = 25, pat
     PAYMENT-SIGNATURE) or k402's kusd-utxo header; each payment also locks 1.5 KAS in the box (yours
     to recover is the provider's) plus ~0.1 KAS fee, reported in `outlay`. If the wallet is short it
     buys the shortfall + 50 cents through the kUSD PSM with your KAS. Fails over to the next provider
-    when one is dead. Local (stdio) k402-mcp only."""
+    when one is dead. Every payment stays inside the bounds the wallet's OPERATOR set (per-call ceiling,
+    budgets, rate, top-up cap, allowlists, freeze — see kusd_spend_status); a refusal returns
+    {"error", "code", "spend"} and nothing was paid. Local (stdio) k402-mcp only."""
     import asyncio
     try:
         payer = _kusd()
         route = asyncio.run(payer.pay_best(capability, path=path, json_body=request_body,
                                            max_price_cents=max_price_cents, policy=policy))
     except Exception as e:
-        return {"error": str(e)}
+        out = {"error": str(e)}
+        try:
+            from k402 import SpendRefused
+        except ImportError:   # the error above already says k402 is missing
+            SpendRefused = ()
+        if isinstance(e, SpendRefused):   # the operator's bounds
+            out.update(code=e.code, spend=e.status,
+                       note="Refused by the wallet operator's spending policy; nothing was paid. Only the operator can change it.")
+        return out
     res = route.result
     try:
         out = route.response.json()
@@ -319,6 +381,20 @@ def kusd_balance() -> dict:
         return _kusd().wallet.balance()
     except Exception as e:
         return {"error": str(e)}
+
+@mcp.tool()
+def kusd_spend_status() -> dict:
+    """What your kUSD wallet's OPERATOR allows pay_kusd to spend, and what is left: frozen (kill switch),
+    lifetime total, this window's cents / calls / PSM top-ups / unserved payments, the remaining amount on
+    each bounded axis, and the policy itself. Read-only and free; the policy can only be changed by the
+    operator (k402-spend CLI, KUSD_SPEND_POLICY). Local (stdio) k402-mcp only."""
+    try:
+        st = _kusd().spend_status()
+    except Exception as e:
+        return {"error": str(e)}
+    if st is None:
+        return {"policy": None, "note": "no spending policy is configured for this wallet"}
+    return st
 
 # ------------------------------------------------------------------ paid: text tools
 @mcp.tool()
